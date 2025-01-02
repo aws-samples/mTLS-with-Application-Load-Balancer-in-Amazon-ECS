@@ -15,6 +15,10 @@ The example in this pattern uses docker images from public gallery to initially 
 - Knowledge of Docker, NGINX
 - AWS Credentials: You will need to configure on your local machine or in your environment by either using the [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/welcome-examples.html) or by setting the environment variables in the ~/.aws/credentials file.
 
+## Architecture Diagram
+
+![mTLS with ALB in Amazon ECS](mTLS-with-Application-Load-Balancer-in-Amazon-ECS.png)
+
 ## Steps required
 
 - Create a private [CA in AWS Private CA](https://docs.aws.amazon.com/privateca/latest/userguide/create-CA.html)
