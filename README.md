@@ -19,6 +19,16 @@ The example in this pattern uses docker images from public gallery to initially 
 
 ![mTLS with ALB in Amazon ECS](mTLS-with-Application-Load-Balancer-in-Amazon-ECS.png)
 
+1. You create a Git repository and commit the application code to the repository.
+2. You Create a private CA in AWS Private CA
+3. You create CodeBuild project. The AWS CodeBuild project is triggered by commit changes and creates the Docker image and publishes the built image to Amazon ECR.
+4. You copy the certificate chain and certificate body from CA and upload the certificate bundle to Amazon Simple Storage Service
+5. Create a trust store with the CA bundle uploaded to S3 and associate the trust store with the mTLS listeners on the Application Load Balancer.
+6. Use the private CA to issue a client certificates for the container workloads. Also create a private TLS certificate using the AWS Private CA.
+7. You import private TLS certificate into ACM and use it with the Application load balancer.
+8. Container workload in the ServiceTwo uses the issued client certificate to authenticate with Application load balancer when it needs to communicate with the other container workload in the ServiceOne
+9. Container workload in the ServiceOne uses the issued client certificate to authenticate with Application load balancer when it needs to communicate with the other container workload in the ServiceTwo
+
 ## Steps required
 
 - Create a private [CA in AWS Private CA](https://docs.aws.amazon.com/privateca/latest/userguide/create-CA.html)
