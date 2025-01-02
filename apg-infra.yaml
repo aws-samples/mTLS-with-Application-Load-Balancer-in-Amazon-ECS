@@ -1,0 +1,878 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Cluster with Fargate Services, ALB, and S3 to demonstrate mTLS'
+
+Parameters:
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: The CIDR range for the VPC. This should be a valid private (RFC 1918) CIDR range.
+  
+  PublicSubnet1CIDR: 
+    Type: String
+    Default: 10.0.0.0/24
+    Description: CidrBlock for public subnet 01 within the VPC  
+  
+  PublicSubnet2CIDR: 
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CidrBlock for public subnet 02 within the VPC  
+  
+  PublicSubnet3CIDR: 
+    Type: String
+    Default: 10.0.2.0/24
+    Description: CidrBlock for public subnet 02 within the VPC    
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.3.0/24
+    Description: CidrBlock for private subnet 01 within the VPC  
+  
+  PrivateSubnet2CIDR: 
+    Type: String
+    Default: 10.0.4.0/24  
+    Description: CidrBlock for private subnet 02 within the VPC  
+
+  PrivateSubnet3CIDR: 
+    Type: String
+    Default: 10.0.5.0/24  
+    Description: CidrBlock for private subnet 02 within the VPC  
+ 
+  CertificateArn:
+    Type: String
+    Description: ARN of ACM SSL certificate
+  
+  ELBAccountId:
+    Type: String
+    Default: 797873946194
+    Description: For specific region, get the Account ID for ELB from https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W60
+            reason: VPC flow logs not required for this example    
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Sub '${AWS::StackName}'
+        
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+      - Key: Network
+        Value: Public
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-PublicSubnetA 
+          
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-PublicSubnetB
+      - Key: Network
+        Value: Public
+
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: !Ref PublicSubnet3CIDR
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 2, !GetAZs ]
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-PublicSubnetC
+      - Key: Network
+        Value: Public
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-PrivateSubnetA 
+      - Key: Network
+        Value: Private
+       
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-PrivateSubnetB 
+      - Key: Network
+        Value: Private
+      
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: !Ref PrivateSubnet3CIDR
+      AvailabilityZone: !Select [ 2, !GetAZs ]
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-PrivateSubnetC
+      - Key: Network
+        Value: Private      
+
+  PrivateNatA:
+      Type: AWS::EC2::NatGateway
+      Properties:
+        AllocationId:
+            Fn::GetAtt:
+            - NatGatewayEIP1
+            - AllocationId
+        SubnetId:
+            Ref: PublicSubnet1
+        Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateNatAGateway
+
+  NatGatewayEIP1:
+      DependsOn: AttachGateway
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc
+
+  PrivateRoute01:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId:
+            Ref: PrivateRouteTable01
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId:
+            Ref: PrivateNatA
+
+  PrivateRouteTable01:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateRouteTable01
+
+  PrivateNatB:
+      Type: AWS::EC2::NatGateway
+      Properties:
+        AllocationId:
+            Fn::GetAtt:
+            - NatGatewayEIP2
+            - AllocationId
+        SubnetId:
+            Ref: PublicSubnet2
+        Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateNatBGateway
+
+  NatGatewayEIP2:
+      DependsOn: AttachGateway
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc
+
+  PrivateRouteTable02:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateRouteTable02
+
+  PrivateRoute02:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId:
+            Ref: PrivateRouteTable02
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId:
+            Ref: PrivateNatB
+
+  PrivateNatC:
+      Type: AWS::EC2::NatGateway
+      Properties:
+        AllocationId:
+            Fn::GetAtt:
+            - NatGatewayEIP3
+            - AllocationId
+        SubnetId:
+            Ref: PublicSubnet3
+        Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateNatCGateway
+
+  NatGatewayEIP3:
+      DependsOn: AttachGateway
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc
+
+  PrivateRoute03:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId:
+            Ref: PrivateRouteTable03
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId:
+            Ref: PrivateNatC
+
+  PrivateRouteTable03:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateRouteTable03
+
+  PrivateSubnet01RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable01
+
+  PrivateSubnet02RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable02
+
+  PrivateSubnet03RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet3
+      RouteTableId: !Ref PrivateRouteTable03
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Network
+        Value: Public
+      - Key: Name      
+        Value: !Sub ${AWS::StackName}-InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: VPC
+      InternetGatewayId:
+        Ref: InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Network
+        Value: Public
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-PublicRouteTable    
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet1
+      RouteTableId:
+        Ref: PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet2
+      RouteTableId:
+        Ref: PublicRouteTable
+
+  PublicSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet3
+      RouteTableId:
+        Ref: PublicRouteTable        
+
+
+  # S3 Bucket
+  StorageBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: no need to log due to cost
+          - id: W51
+            reason: no need for bucket policy for the scope    
+    # checkov:skip=CKV_AWS_18:Ensure the S3 bucket has access logging enabled  
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled        
+
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${AWS::StackName}
+      CapacityProviders: 
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+          Base: 1
+      Configuration:
+        ExecuteCommandConfiguration:
+            Logging: DEFAULT   
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled          
+
+  # Security Group for ALB
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: return traffic to user from internet for testing
+          - id: W40
+            reason: engress open all port for the internet 
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Security group for internal ALB
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8090
+          ToPort: 8090
+          CidrIp: !Ref VpcCIDR
+          Description: Allow traffic from VPC
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref VpcCIDR
+          Description: Allow traffic from VPC
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic          
+
+
+  # Security Group for ECS Tasks
+  ECSSecurityGroupServiceOne:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: return traffic to user from internet for testing
+          - id: W40
+            reason: engress open all port for the internet
+          - id: W42
+            reason: allow all ingress port within ecs fargate security group    
+    Properties:
+      VpcId: !Ref VPC    
+      GroupDescription: Security group for ECS tasks
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow traffic from internal ALB
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic          
+
+  ECSSecurityGroupServiceTwo:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: return traffic to user from internet for testing
+          - id: W40
+            reason: engress open all port for the internet
+          - id: W42
+            reason: allow all ingress port within ecs fargate security group    
+    Properties:
+      VpcId: !Ref VPC    
+      GroupDescription: Security group for ECS tasks
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow traffic from internal ALB
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0 
+          Description: Allow all outbound traffic          
+
+  ALBLogBucket:
+    Type: AWS::S3::Bucket
+    # checkov:skip=CKV_AWS_18:Ensure the S3 bucket has access logging enabled
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "for scope, no need for S3 Bucket access logging"          
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256        
+
+  ALBLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ALBLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: logdelivery.elasticloadbalancing.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub '${ALBLogBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${ELBAccountId}:root'
+            Action: 
+              - 's3:PutObject'
+              - 's3:GetBucketAcl'
+            Resource:
+              - !GetAtt ALBLogBucket.Arn
+              - !Sub '${ALBLogBucket.Arn}/*'
+
+
+
+  # Internal Application Load Balancer
+  InternalALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    # checkov:skip=CKV_AWS_131: Ensure that ALB drops HTTP headers      
+    Properties:
+      Scheme: internal
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      Type: application
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: true
+        - Key: access_logs.s3.bucket
+          Value: !Ref ALBLogBucket
+        - Key: access_logs.s3.prefix
+          Value: !Sub 'alb-logs/${AWS::StackName}'
+        - Key: connection_logs.enabled
+          Value: true                
+
+  # ALB Listeners
+  HTTPSListener1:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalALB
+      Port: 8080
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup1
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-Ext-2018-06
+
+  HTTPSListener2:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalALB
+      Port: 8090
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup2
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-Ext-2018-06
+
+
+  # Target Groups
+  TargetGroup1:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+
+  TargetGroup2:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "enable exec into task" 
+    # checkov:skip=CKV_AWS_111: Ensure IAM policies does not allow write access without constraints
+    # checkov:skip=CKV_AWS_107: Ensure IAM policies does not allow credentials exposure
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ssm-sensitive-secret-ecs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:  
+              - Effect: Allow
+                Action: 
+                - 'kms:Decrypt'
+                - 'kms:Encrypt'
+                - 'kms:ReEncrypt*'
+                - 'kms:GenerateDataKey*'
+                - 'kms:DescribeKey'
+                Resource: '*'           
+              - Effect: Allow
+                Action: 
+                  - 'ecr-public:DescribeImages'
+                  - 'ecr-public:GetRepositoryPolicy'
+                  - 'ecr-public:GetAuthorizationToken'
+                  - 'ecr-public:DescribeImageTags'
+                  - 'ecr-public:DescribeRegistries'
+                  - 'ecr-public:BatchCheckLayerAvailability'
+                  - 'ecr-public:GetRepositoryCatalogData'
+                  - 'ecr-public:BatchGetImage'
+                Resource: '*'   
+
+  # Task Definitions
+  TaskDefinition1:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nginx-task-def1
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskExecutionRole.Arn      
+      Cpu: '256'
+      Memory: '512'
+      ContainerDefinitions:
+        - Name: nginx
+          Image: public.ecr.aws/nginx/nginx:latest
+          Essential: true
+          LinuxParameters: 
+            InitProcessEnabled: true   
+          HealthCheck:
+              Command:
+                  - "CMD-SHELL"
+                  - "curl -f http://localhost/ || exit 1"
+              Interval: 5
+              Retries: 2
+              Timeout: 3                    
+          PortMappings:
+            - ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup1
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: nginx1
+
+  TaskDefinition2:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nginx-task-def2
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskExecutionRole.Arn      
+      Cpu: '256'
+      Memory: '512'
+      ContainerDefinitions:
+        - Name: nginx
+          Image: public.ecr.aws/nginx/nginx:latest
+          Essential: true
+          LinuxParameters: 
+            InitProcessEnabled: true   
+          HealthCheck:
+              Command:
+                  - "CMD-SHELL"
+                  - "curl -f http://localhost/ || exit 1"
+              Interval: 5
+              Retries: 2
+              Timeout: 3                    
+          PortMappings:
+            - ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup2
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: nginx2
+
+  # KMS Key for CloudWatch Logs encryption
+  CloudWatchLogsKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for encrypting CloudWatch Logs
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow CloudWatch Logs
+            Effect: Allow
+            Principal:
+              Service: 'logs.amazonaws.com'
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+
+  # KMS Key Alias
+  CloudWatchLogsKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-cloudwatch-logs'
+      TargetKeyId: !Ref CloudWatchLogsKMSKey
+
+  # CloudWatch Log Groups
+  LogGroup1:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/nginx-service-1
+      KmsKeyId: !GetAtt CloudWatchLogsKMSKey.Arn
+      RetentionInDays: 30
+
+  LogGroup2:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/nginx-service-2
+      KmsKeyId: !GetAtt CloudWatchLogsKMSKey.Arn
+      RetentionInDays: 30
+
+  # ECS Services
+  Service1:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPSListener1
+    Properties:
+      ServiceName: nginx-service-1
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition1
+      EnableExecuteCommand: true
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroupServiceOne
+          Subnets: 
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+            - !Ref PrivateSubnet3
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroup1
+          ContainerName: nginx
+          ContainerPort: 80
+
+  Service2:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPSListener2
+    Properties:
+      ServiceName: nginx-service-2
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition2
+      EnableExecuteCommand: true
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroupServiceTwo
+          Subnets: 
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+            - !Ref PrivateSubnet3
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroup2
+          ContainerName: nginx
+          ContainerPort: 80
+
+  ECRRepositoryServiceOne:
+    Type: AWS::ECR::Repository
+    # checkov:skip=CKV_AWS_136: Ensure that ECR repositories are encrypted using KMS. Using AES already    
+    Properties:
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256    
+
+  ECRRepositoryServiceTwo:
+    Type: AWS::ECR::Repository
+    # checkov:skip=CKV_AWS_136: Ensure that ECR repositories are encrypted using KMS. Using AES already
+    Properties:
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+
+Outputs:
+  LoadBalancerDNS:
+    Description: Internal ALB DNS Name
+    Value: !GetAtt InternalALB.DNSName
+  BucketName:
+    Description: Name of created S3 bucket
+    Value: !Ref StorageBucket
+  ECRRepositoryServiceOne:
+    Description: Name of created ECR repository Service One
+    Value: !Ref ECRRepositoryServiceOne
+  ECRRepositoryServiceTwo:
+    Description: Name of created ECR repository Service Two
+    Value: !Ref ECRRepositoryServiceTwo
+  Service1:
+    Description: Name of created ECS service 1
+    Value: !Ref Service1
+  Service2:
+    Description: Name of created ECS service 2
+    Value: !Ref Service2
+  TaskDefinition1:
+    Description: Name of created ECS task definition 1
+    Value: !Ref TaskDefinition1
+  TaskDefinition2:
+    Description: Name of created ECS task definition 2
+    Value: !Ref TaskDefinition2
+  ECRRepositoryUri:
+    Description: URI of created ECR repository Service One
+    Value:
+      Fn::Join:
+        - ""
+        - - !Ref AWS::AccountId
+          - ".dkr.ecr."
+          - !Ref AWS::Region
+          - ".amazonaws.com"  
+  ECRRepositoryServiceOneUri:
+    Description: URI of created ECR repository Service One
+    Value:
+      Fn::Join:
+        - ""
+        - - !Ref AWS::AccountId
+          - ".dkr.ecr."
+          - !Ref AWS::Region
+          - ".amazonaws.com/"
+          - !Ref ECRRepositoryServiceOne
+          - ":latest"
+  ECRRepositoryServiceTwoUri:
+    Description: URI of created ECR repository Service Two
+    Value:
+      Fn::Join:
+        - ""
+        - - !Ref AWS::AccountId
+          - ".dkr.ecr."
+          - !Ref AWS::Region
+          - ".amazonaws.com/"
+          - !Ref ECRRepositoryServiceTwo
+          - ":latest"
+  ClusterName:
+    Description: Name of created ECS cluster
+    Value: !Ref ECSCluster
+  Service1ListenerArn:
+    Description: ARN of created ALB listener
+    Value: !Ref HTTPSListener1
+  Service2ListenerArn:
+    Description: ARN of created ALB listener
+    Value: !Ref HTTPSListener2
+  S3bucket:
+    Description: Name of created S3 bucket
+    Value: !Ref StorageBucket
+
