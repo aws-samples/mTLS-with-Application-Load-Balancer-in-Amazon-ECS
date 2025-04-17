@@ -42,6 +42,11 @@ The example in this pattern uses docker images from public gallery to initially 
 - Build your own docker images and push to Amazon ECR
 - Create a new revision of the task definition and update the services
 
+## Guidance
+
+For a step-by-step guidance on implementing this pattern, refer to the documentation on the APG site:
+[Simplify application authentication with mutual TLS in Amazon ECS by using Application Load Balancer](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/simplify-application-authentication-with-mutual-tls-in-amazon-ecs.html)
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
