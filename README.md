@@ -44,7 +44,7 @@ The example in this pattern uses docker images from public gallery to initially 
 
 ## Guidance
 
-For a step-by-step guidance on implementing this pattern, refer to the documentation on the APG site:
+For a step-by-step guidance on implementing this pattern see [Quickstart](./quickstart), or refer to the documentation on the APG site:
 [Simplify application authentication with mutual TLS in Amazon ECS by using Application Load Balancer](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/simplify-application-authentication-with-mutual-tls-in-amazon-ecs.html)
 
 ## Security
