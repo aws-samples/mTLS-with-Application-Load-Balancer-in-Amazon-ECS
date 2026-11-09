@@ -1,0 +1,9 @@
+# Dependabot version updates.
+# https://docs.github.com/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+version: 2
+updates:
+  # GitHub Actions used in .github/workflows (directory "/" means the default location)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
