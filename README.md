@@ -1,3 +1,8 @@
+# Simplify application authentication with mutual TLS in Amazon ECS by using Application Load Balancer
+
+[![Checkov](https://github.com/aws-samples/mTLS-with-Application-Load-Balancer-in-Amazon-ECS/actions/workflows/checkov.yml/badge.svg?branch=main)](https://github.com/aws-samples/mTLS-with-Application-Load-Balancer-in-Amazon-ECS/actions/workflows/checkov.yml)
+[![License: MIT-0](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
+
 ## mTLS with Application Load Balancer in Amazon ECS
 
 This pattern provides guidance for implementing [Mutual Transport Layer Security](https://en.wikipedia.org/wiki/Mutual_authentication) (mTLS) in Amazon Elastic Container Service (Amazon ECS) by using [Application Load Balancer (ALB)](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/mutual-authentication.html) to authenticate X.509 client certificates from AWS Private Certificate Authority (PCA). The pattern use Amazon Elastic Container Registry (Amazon ECR) to store container images.
@@ -8,7 +13,7 @@ The example in this pattern uses docker images from public gallery to initially 
 
 ## Prerequisites
 
-- [AWS Account](https://signin.aws.amazon.com/signin?redirect_uri=https%3A%2F%2Fportal.aws.amazon.com%2Fbilling%2Fsignup%2Fresume&client_id=signup&code_challenge_method=SHA-256&code_challenge=XEEgw2-l_BhdGq9gejjCnbmOG9-bgXnWTm7f-20KOTk) with an access to deploy CloudFormation stacks.
+- [AWS Account](https://signin.aws.amazon.com/signin?redirect_uri=https%3A%2F%2Fportal.aws.amazon.com%2Fbilling%2Fsignup%2Fresume&client_id=signup&code_challenge_method=SHA-256&code_challenge=XEEgw2-l_BhdGq9gejjCnbmOG9-bgXnWTm7f-20KOTk) with an access to deploy CloudFormation stacks. The identity that deploys the stack also needs `kms:CreateGrant`, `kms:RetireGrant` and `kms:DescribeKey`, because the Amazon ECR repositories are [encrypted with an AWS KMS key](https://docs.aws.amazon.com/AmazonECR/latest/userguide/encryption-at-rest.html) created by the template.
 - Install [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) latest version.
 - Install [OpenSSL](https://www.openssl.org/)
 - Familiarity with AWS services, including Amazon ECS and Fargate
@@ -46,6 +51,26 @@ The example in this pattern uses docker images from public gallery to initially 
 
 For a step-by-step guidance on implementing this pattern see [Quickstart](./quickstart), or refer to the documentation on the APG site:
 [Simplify application authentication with mutual TLS in Amazon ECS by using Application Load Balancer](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/simplify-application-authentication-with-mutual-tls-in-amazon-ecs.html)
+
+## Continuous integration
+
+| Workflow | What it does |
+|---|---|
+| [Checkov](.github/workflows/checkov.yml) | Scans the CloudFormation template [`apg-infra.yaml`](apg-infra.yaml) with [Checkov](https://www.checkov.io/) on every push and pull request to `main`, and uploads the results to GitHub code scanning |
+
+<details>
+<summary>Checkov checks skipped in this project, and why</summary>
+
+Skips are declared on the affected resource in the template (`Metadata.checkov.skip`), not for the
+whole scan, so the check still applies to every other resource.
+
+| Check | Description | Resource | Reason |
+|---|---|---|---|
+| CKV_AWS_18 | Ensure the S3 bucket has access logging enabled | `AccessLogBucket` | This bucket is the server access log destination for the other buckets in the stack. Amazon S3 [does not recommend a bucket logging to itself](https://docs.aws.amazon.com/AmazonS3/latest/userguide/enable-server-access-logging.html) because it creates an infinite loop of log records, and a log destination bucket cannot use S3 Object Lock. |
+
+The template also carries two [cfn-guard](https://github.com/aws-cloudformation/cloudformation-guard) suppressions (`Metadata.guard.SuppressedRules`) for the same reasons: `S3_BUCKET_LOGGING_ENABLED` and `S3_BUCKET_DEFAULT_LOCK_ENABLED` on `AccessLogBucket`, and `NO_UNRESTRICTED_ROUTE_TO_IGW` on `PublicRoute`, because the public subnets only host the NAT gateways that give the private subnets outbound internet access.
+
+</details>
 
 ## Security
 
