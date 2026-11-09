@@ -20,7 +20,7 @@ Parameters:
   PublicSubnet3CIDR: 
     Type: String
     Default: 10.0.2.0/24
-    Description: CidrBlock for public subnet 02 within the VPC    
+    Description: CidrBlock for public subnet 03 within the VPC    
 
   PrivateSubnet1CIDR:
     Type: String
@@ -35,16 +35,11 @@ Parameters:
   PrivateSubnet3CIDR: 
     Type: String
     Default: 10.0.5.0/24  
-    Description: CidrBlock for private subnet 02 within the VPC  
+    Description: CidrBlock for private subnet 03 within the VPC  
  
   CertificateArn:
     Type: String
     Description: ARN of ACM SSL certificate
-  
-  ELBAccountId:
-    Type: String
-    Default: 797873946194
-    Description: For specific region, get the Account ID for ELB from https://docs.aws.amazon.com/elasticloadbalancing/latest/application/enable-access-logging.html
 
 Resources:
   VPC:
@@ -110,6 +105,7 @@ Resources:
       VpcId:
         Ref: VPC
       CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
       AvailabilityZone: !Select [ 0, !GetAZs ]
       Tags:
       - Key: Name
@@ -123,6 +119,7 @@ Resources:
       VpcId:
         Ref: VPC
       CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
       AvailabilityZone: !Select [ 1, !GetAZs ]
       Tags:
       - Key: Name
@@ -136,6 +133,7 @@ Resources:
       VpcId:
         Ref: VPC
       CidrBlock: !Ref PrivateSubnet3CIDR
+      MapPublicIpOnLaunch: false
       AvailabilityZone: !Select [ 2, !GetAZs ]
       Tags:
       - Key: Name
@@ -300,6 +298,13 @@ Resources:
   PublicRoute:
     Type: AWS::EC2::Route
     DependsOn: AttachGateway
+    # The public subnets host only the NAT gateways; no workloads run there and the ALB is
+    # internal. A default route to the internet gateway is required for the NAT gateways to
+    # provide outbound-only internet access (image pulls, AWS API calls) to the private subnets.
+    Metadata:
+      guard:
+        SuppressedRules:
+          - NO_UNRESTRICTED_ROUTE_TO_IGW
     Properties:
       RouteTableId:
         Ref: PublicRouteTable
@@ -332,18 +337,30 @@ Resources:
         Ref: PublicRouteTable        
 
 
-  # S3 Bucket
-  StorageBucket:
+  # S3 bucket that receives server access logs from the other buckets in this stack.
+  # It is the terminal log destination: Amazon S3 does not recommend a bucket logging to itself
+  # (it creates an infinite loop of log records) and does not support S3 Object Lock on a
+  # server access log destination bucket.
+  AccessLogBucket:
     Type: AWS::S3::Bucket
     Metadata:
       cfn_nag:
         rules_to_suppress:
           - id: W35
-            reason: no need to log due to cost
-          - id: W51
-            reason: no need for bucket policy for the scope    
-    # checkov:skip=CKV_AWS_18:Ensure the S3 bucket has access logging enabled  
+            reason: "This bucket is the server access log destination for the stack; a bucket must not log to itself."
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_LOGGING_ENABLED
+          - S3_BUCKET_DEFAULT_LOCK_ENABLED
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: "This bucket is the server access log destination for the stack; a bucket must not log to itself."
     Properties:
+      AccessControl: Private
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -354,7 +371,78 @@ Resources:
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
       VersioningConfiguration:
-        Status: Enabled        
+        Status: Enabled
+
+  AccessLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AccessLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowS3ServerAccessLogDelivery
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub '${AccessLogBucket.Arn}/s3-access-logs/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AccessLogBucket.Arn
+              - !Sub '${AccessLogBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  # S3 bucket that holds the CA bundle for the ALB trust store and the client certificates
+  # consumed by the image build.
+  StorageBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: AccessLogBucketPolicy
+    Properties:
+      AccessControl: Private
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogBucket
+        LogFilePrefix: s3-access-logs/storage-bucket/
+
+  StorageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StorageBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt StorageBucket.Arn
+              - !Sub '${StorageBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
 
   # ECS Cluster
   ECSCluster:
@@ -456,17 +544,19 @@ Resources:
           CidrIp: 0.0.0.0/0 
           Description: Allow all outbound traffic          
 
+  # S3 bucket that receives the ALB access logs and connection logs.
+  # Elastic Load Balancing only supports SSE-S3 encryption on this bucket.
   ALBLogBucket:
     Type: AWS::S3::Bucket
-    # checkov:skip=CKV_AWS_18:Ensure the S3 bucket has access logging enabled
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W35
-            reason: "for scope, no need for S3 Bucket access logging"          
+    DependsOn: AccessLogBucketPolicy
     Properties:
+      AccessControl: Private
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
       VersioningConfiguration:
         Status: Enabled
+      ObjectLockEnabled: true
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -476,6 +566,9 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256        
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogBucket
+        LogFilePrefix: s3-access-logs/alb-log-bucket/
 
   ALBLogBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -484,30 +577,33 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Effect: Allow
+          - Sid: AllowELBLogDelivery
+            Effect: Allow
             Principal:
               Service: logdelivery.elasticloadbalancing.amazonaws.com
             Action: 's3:PutObject'
-            Resource: !Sub '${ALBLogBucket.Arn}/*'
-            Condition:
-              StringEquals:
-                's3:x-amz-acl': 'bucket-owner-full-control'
-          - Effect: Allow
-            Principal:
-              AWS: !Sub 'arn:aws:iam::${ELBAccountId}:root'
-            Action: 
-              - 's3:PutObject'
-              - 's3:GetBucketAcl'
+            Resource:
+              - !Sub '${ALBLogBucket.Arn}/alb-logs/${AWS::StackName}/AWSLogs/${AWS::AccountId}/*'
+              - !Sub '${ALBLogBucket.Arn}/alb-connection-logs/${AWS::StackName}/AWSLogs/${AWS::AccountId}/*'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
             Resource:
               - !GetAtt ALBLogBucket.Arn
               - !Sub '${ALBLogBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
 
 
 
   # Internal Application Load Balancer
   InternalALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    # checkov:skip=CKV_AWS_131: Ensure that ALB drops HTTP headers      
+    # Elastic Load Balancing validates the bucket policy when access logging is enabled,
+    # so the bucket policy must exist before the load balancer is created.
+    DependsOn: ALBLogBucketPolicy
     Properties:
       Scheme: internal
       SecurityGroups:
@@ -524,8 +620,14 @@ Resources:
           Value: !Ref ALBLogBucket
         - Key: access_logs.s3.prefix
           Value: !Sub 'alb-logs/${AWS::StackName}'
-        - Key: connection_logs.enabled
-          Value: true                
+        - Key: connection_logs.s3.enabled
+          Value: true
+        - Key: connection_logs.s3.bucket
+          Value: !Ref ALBLogBucket
+        - Key: connection_logs.s3.prefix
+          Value: !Sub 'alb-connection-logs/${AWS::StackName}'
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: true
 
   # ALB Listeners
   HTTPSListener1:
@@ -576,53 +678,134 @@ Resources:
       HealthCheckPath: /
       HealthCheckIntervalSeconds: 30
 
+  # IAM roles
+  #
+  # The task execution role is used by the ECS agent to pull images and ship container logs.
+  # Each service has its own task role, used by the code running inside the container. The
+  # task roles grant only what ECS Exec needs: the SSM Session Manager channels, and write
+  # access to the service's own log group for the session log. The containers do not call
+  # Amazon S3 or AWS KMS at runtime (client certificates are baked into the image at build time).
+
   TaskExecutionRole:
     Type: AWS::IAM::Role
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W11
-            reason: "enable exec into task" 
-    # checkov:skip=CKV_AWS_111: Ensure IAM policies does not allow write access without constraints
-    # checkov:skip=CKV_AWS_107: Ensure IAM policies does not allow credentials exposure
     Properties:
       Path: /
       AssumeRolePolicyDocument:
-        Version: 2012-10-17
+        Version: '2012-10-17'
         Statement:
           - Action: sts:AssumeRole
             Effect: Allow
             Principal:
               Service: ecs-tasks.amazonaws.com
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-        - arn:aws:iam::aws:policy/CloudWatchFullAccess
-        - arn:aws:iam::aws:policy/AmazonS3FullAccess
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-      Policies:
-        - PolicyName: ssm-sensitive-secret-ecs
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:  
-              - Effect: Allow
-                Action: 
-                - 'kms:Decrypt'
-                - 'kms:Encrypt'
-                - 'kms:ReEncrypt*'
-                - 'kms:GenerateDataKey*'
-                - 'kms:DescribeKey'
-                Resource: '*'           
-              - Effect: Allow
-                Action: 
-                  - 'ecr-public:DescribeImages'
-                  - 'ecr-public:GetRepositoryPolicy'
-                  - 'ecr-public:GetAuthorizationToken'
-                  - 'ecr-public:DescribeImageTags'
-                  - 'ecr-public:DescribeRegistries'
-                  - 'ecr-public:BatchCheckLayerAvailability'
-                  - 'ecr-public:GetRepositoryCatalogData'
-                  - 'ecr-public:BatchGetImage'
-                Resource: '*'   
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  ServiceOneTaskPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: "ssmmessages channel actions and logs:DescribeLogGroups do not support resource-level permissions."
+    Properties:
+      Description: Permissions required by ECS Exec for service one
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EcsExecSessionChannels
+            Effect: Allow
+            Action:
+              - 'ssmmessages:CreateControlChannel'
+              - 'ssmmessages:CreateDataChannel'
+              - 'ssmmessages:OpenControlChannel'
+              - 'ssmmessages:OpenDataChannel'
+            Resource: '*'
+          - Sid: EcsExecSessionLogs
+            Effect: Allow
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:DescribeLogStreams'
+              - 'logs:PutLogEvents'
+            Resource: !GetAtt LogGroup1.Arn
+          - Sid: EcsExecDescribeLogGroups
+            Effect: Allow
+            Action: 'logs:DescribeLogGroups'
+            Resource: '*'
+
+  ServiceOneTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Ref ServiceOneTaskPolicy
+
+  ServiceTwoTaskPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: "ssmmessages channel actions and logs:DescribeLogGroups do not support resource-level permissions."
+    Properties:
+      Description: Permissions required by ECS Exec for service two
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EcsExecSessionChannels
+            Effect: Allow
+            Action:
+              - 'ssmmessages:CreateControlChannel'
+              - 'ssmmessages:CreateDataChannel'
+              - 'ssmmessages:OpenControlChannel'
+              - 'ssmmessages:OpenDataChannel'
+            Resource: '*'
+          - Sid: EcsExecSessionLogs
+            Effect: Allow
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:DescribeLogStreams'
+              - 'logs:PutLogEvents'
+            Resource: !GetAtt LogGroup2.Arn
+          - Sid: EcsExecDescribeLogGroups
+            Effect: Allow
+            Action: 'logs:DescribeLogGroups'
+            Resource: '*'
+
+  ServiceTwoTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Ref ServiceTwoTaskPolicy
 
   # Task Definitions
   TaskDefinition1:
@@ -633,7 +816,7 @@ Resources:
         - FARGATE
       NetworkMode: awsvpc
       ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
-      TaskRoleArn: !GetAtt TaskExecutionRole.Arn      
+      TaskRoleArn: !GetAtt ServiceOneTaskRole.Arn
       Cpu: '256'
       Memory: '512'
       ContainerDefinitions:
@@ -666,7 +849,7 @@ Resources:
         - FARGATE
       NetworkMode: awsvpc
       ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
-      TaskRoleArn: !GetAtt TaskExecutionRole.Arn      
+      TaskRoleArn: !GetAtt ServiceTwoTaskRole.Arn
       Cpu: '256'
       Memory: '512'
       ContainerDefinitions:
@@ -703,7 +886,7 @@ Resources:
           - Sid: Enable IAM User Permissions
             Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
             Action: 'kms:*'
             Resource: '*'
           - Sid: Allow CloudWatch Logs
@@ -717,6 +900,9 @@ Resources:
               - 'kms:GenerateDataKey*'
               - 'kms:Describe*'
             Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
 
   # KMS Key Alias
   CloudWatchLogsKMSKeyAlias:
@@ -724,6 +910,31 @@ Resources:
     Properties:
       AliasName: !Sub 'alias/${AWS::StackName}-cloudwatch-logs'
       TargetKeyId: !Ref CloudWatchLogsKMSKey
+
+  # KMS Key for Amazon ECR repository encryption.
+  # Amazon ECR uses KMS grants created on behalf of the principal that creates the repository,
+  # so the identity deploying this stack needs kms:CreateGrant, kms:RetireGrant and
+  # kms:DescribeKey on this key (granted here through the account root statement).
+  ECRKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for encrypting Amazon ECR repositories
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  ECRKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-ecr'
+      TargetKeyId: !Ref ECRKMSKey
 
   # CloudWatch Log Groups
   LogGroup1:
@@ -789,23 +1000,23 @@ Resources:
 
   ECRRepositoryServiceOne:
     Type: AWS::ECR::Repository
-    # checkov:skip=CKV_AWS_136: Ensure that ECR repositories are encrypted using KMS. Using AES already    
     Properties:
       ImageTagMutability: IMMUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:
-        EncryptionType: AES256    
+        EncryptionType: KMS
+        KmsKey: !GetAtt ECRKMSKey.Arn
 
   ECRRepositoryServiceTwo:
     Type: AWS::ECR::Repository
-    # checkov:skip=CKV_AWS_136: Ensure that ECR repositories are encrypted using KMS. Using AES already
     Properties:
       ImageTagMutability: IMMUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
       EncryptionConfiguration:
-        EncryptionType: AES256
+        EncryptionType: KMS
+        KmsKey: !GetAtt ECRKMSKey.Arn
 
 Outputs:
   LoadBalancerDNS:
@@ -875,4 +1086,3 @@ Outputs:
   S3bucket:
     Description: Name of created S3 bucket
     Value: !Ref StorageBucket
-
