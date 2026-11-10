@@ -36,6 +36,8 @@ The example in this pattern uses docker images from public gallery to initially 
 
 ## Steps required
 
+The list below is a summary. [quickstart.md](quickstart.md) contains the detailed commands for each step.
+
 - Create a private [CA in AWS Private CA](https://docs.aws.amazon.com/privateca/latest/userguide/create-CA.html)
 - Create and [install your private CA certificate](https://docs.aws.amazon.com/privateca/latest/userguide/PCACertInstall.html)
 - Issue private [end-entity certificates](https://docs.aws.amazon.com/privateca/latest/userguide/PcaIssueCert.html)
@@ -49,7 +51,7 @@ The example in this pattern uses docker images from public gallery to initially 
 
 ## Guidance
 
-For a step-by-step guidance on implementing this pattern see [Quickstart](./quickstart), or refer to the documentation on the APG site:
+For a step-by-step guidance on implementing this pattern see [quickstart.md](quickstart.md), or refer to the documentation on the APG site:
 [Simplify application authentication with mutual TLS in Amazon ECS by using Application Load Balancer](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/simplify-application-authentication-with-mutual-tls-in-amazon-ecs.html)
 
 ## Continuous integration
