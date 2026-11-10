@@ -40,14 +40,15 @@ The list below is a summary. [quickstart.md](quickstart.md) contains the detaile
 
 - Create a private [CA in AWS Private CA](https://docs.aws.amazon.com/privateca/latest/userguide/create-CA.html)
 - Create and [install your private CA certificate](https://docs.aws.amazon.com/privateca/latest/userguide/PCACertInstall.html)
-- Issue private [end-entity certificates](https://docs.aws.amazon.com/privateca/latest/userguide/PcaIssueCert.html)
+- Issue private [end-entity certificates](https://docs.aws.amazon.com/privateca/latest/userguide/PcaIssueCert.html) for the two services
 - Retrieve your [CA certificate from AWS Private CA](https://docs.aws.amazon.com/privateca/latest/userguide/PcaGetCert.html)
 - In ACM, [request a private PKI certificate signed by a CA from AWS Private CA](https://docs.aws.amazon.com/acm/latest/userguide/gs-acm-request-private.html#request-private-cli)
-- Create Trust store
-- Deploy the [CloudFormation template to provision the AWS resources](./apg-infra.yaml)
-- Associate the trust store to the ALB provisioned by updating the listeners to enable mtls
-- Build your own docker images and push to Amazon ECR
-- Create a new revision of the task definition and update the services
+- Deploy the [CloudFormation template](./apg-infra.yaml) (first pass). The services run zero tasks until mutual TLS is enabled
+- Upload the CA bundle and client certificates to the stack's S3 bucket, then delete the local private keys
+- Build your own docker images and push them to Amazon ECR with a unique (commit) tag
+- Update the stack (second pass) with the CA bundle key and image URIs. The stack creates the trust store, enables mutual TLS (`Mode=verify`) on both listeners, and starts the services
+
+> **Note:** This is sample code. The sample builds each service's client private key into its container image for simplicity. For production use, store the key in AWS Secrets Manager and inject it at task start, restrict image pulls and ECS Exec, restrict who can issue certificates from the CA (`acm-pca:IssueCertificate`, `acm:ExportCertificate`) and update the trust store, authorize callers per service, and automate certificate rotation and revocation. See [Production considerations](quickstart.md#production-considerations).
 
 ## Guidance
 

@@ -1,0 +1,13 @@
+# Private keys, CSRs and certificates generated while following quickstart.md.
+# Never commit them; delete local copies after uploading to Amazon S3.
+*.pem
+*.key
+*.crt
+*.cert
+*.csr
+
+# Local threat model output (contains a list of weaknesses; share through the review ticket)
+.threatmodel/
+
+# Local agent tooling
+.agents/

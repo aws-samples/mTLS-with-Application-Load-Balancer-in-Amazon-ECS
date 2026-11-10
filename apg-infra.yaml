@@ -41,6 +41,52 @@ Parameters:
     Type: String
     Description: ARN of ACM SSL certificate
 
+  # Mutual TLS is enabled by the stack itself, not by a manual listener change, so the
+  # listeners cannot drift back to server-side TLS only. The trust store is created from the
+  # CA bundle in StorageBucket, which only exists after the first deployment, so deployment
+  # happens in two passes:
+  #   1. Deploy with this parameter empty. Both services run zero tasks, so nothing is served
+  #      before mutual TLS is enforced.
+  #   2. Upload the CA bundle to StorageBucket, then update the stack with this parameter set
+  #      to its object key (for example acm-trust-store/ca-cert.pem) and the image parameters
+  #      set to your images. The trust store is created, both listeners switch to
+  #      MutualAuthentication Mode=verify, and the services start.
+  TrustStoreCABundleS3Key:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[A-Za-z0-9!_.*()/-]+\.pem$'
+    Description: >-
+      Object key of the CA certificate bundle (PEM) in the stack's StorageBucket, for example
+      acm-trust-store/ca-cert.pem. Leave empty on the first deployment; mutual TLS and the
+      services are enabled when this is set.
+
+  ServiceOneImage:
+    Type: String
+    Default: public.ecr.aws/nginx/nginx:latest
+    Description: >-
+      Container image for service one. Set it to the image you built and pushed to the service
+      one ECR repository, using its commit tag (the repositories use immutable tags).
+
+  ServiceTwoImage:
+    Type: String
+    Default: public.ecr.aws/nginx/nginx:latest
+    Description: >-
+      Container image for service two. Set it to the image you built and pushed to the service
+      two ECR repository, using its commit tag (the repositories use immutable tags).
+
+  EnableECSExec:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Enable ECS Exec on both services so you can open a shell in a task to test mutual TLS.
+      ECS Exec gives read access to the client private key in the container. Set to true only
+      while testing, then update the stack back to false.
+
+Conditions:
+  EnableMutualTLS: !Not [!Equals [!Ref TrustStoreCABundleS3Key, '']]
+  ECSExecEnabled: !Equals [!Ref EnableECSExec, 'true']
+
 Resources:
   VPC:
     Type: AWS::EC2::VPC
@@ -422,6 +468,25 @@ Resources:
       VersioningConfiguration:
         Status: Enabled
       ObjectLockEnabled: true
+      # Superseded client certificates and private keys are kept as noncurrent versions when
+      # they are overwritten or deleted. Expire them after one day so old keys do not linger.
+      # (Object Lock is enabled without a default retention, so these versions can expire.)
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldServiceOneKeyVersions
+            Status: Enabled
+            Prefix: serviceone/
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: ExpireOldServiceTwoKeyVersions
+            Status: Enabled
+            Prefix: servicetwo/
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
       LoggingConfiguration:
         DestinationBucketName: !Ref AccessLogBucket
         LogFilePrefix: s3-access-logs/storage-bucket/
@@ -629,7 +694,18 @@ Resources:
         - Key: routing.http.drop_invalid_header_fields.enabled
           Value: true
 
+  # ALB trust store, built from the CA bundle uploaded to StorageBucket. Created only once
+  # TrustStoreCABundleS3Key is set (second deployment pass).
+  MutualTLSTrustStore:
+    Type: AWS::ElasticLoadBalancingV2::TrustStore
+    Condition: EnableMutualTLS
+    Properties:
+      CaCertificatesBundleS3Bucket: !Ref StorageBucket
+      CaCertificatesBundleS3Key: !Ref TrustStoreCABundleS3Key
+
   # ALB Listeners
+  # MutualAuthentication Mode=verify makes the ALB reject any client that does not present a
+  # valid certificate chaining to the trust store. Expired client certificates are rejected.
   HTTPSListener1:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -641,7 +717,13 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup1
-      SslPolicy: ELBSecurityPolicy-TLS-1-2-Ext-2018-06
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      MutualAuthentication: !If
+        - EnableMutualTLS
+        - Mode: verify
+          TrustStoreArn: !GetAtt MutualTLSTrustStore.TrustStoreArn
+          IgnoreClientCertificateExpiry: false
+        - !Ref AWS::NoValue
 
   HTTPSListener2:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -654,7 +736,13 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup2
-      SslPolicy: ELBSecurityPolicy-TLS-1-2-Ext-2018-06
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      MutualAuthentication: !If
+        - EnableMutualTLS
+        - Mode: verify
+          TrustStoreArn: !GetAtt MutualTLSTrustStore.TrustStoreArn
+          IgnoreClientCertificateExpiry: false
+        - !Ref AWS::NoValue
 
 
   # Target Groups
@@ -821,7 +909,7 @@ Resources:
       Memory: '512'
       ContainerDefinitions:
         - Name: nginx
-          Image: public.ecr.aws/nginx/nginx:latest
+          Image: !Ref ServiceOneImage
           Essential: true
           LinuxParameters: 
             InitProcessEnabled: true   
@@ -854,7 +942,7 @@ Resources:
       Memory: '512'
       ContainerDefinitions:
         - Name: nginx
-          Image: public.ecr.aws/nginx/nginx:latest
+          Image: !Ref ServiceTwoImage
           Essential: true
           LinuxParameters: 
             InitProcessEnabled: true   
@@ -952,6 +1040,8 @@ Resources:
       RetentionInDays: 30
 
   # ECS Services
+  # DesiredCount stays at 0 until mutual TLS is enabled on the listeners, so the services are
+  # never reachable through the ALB without client certificate verification.
   Service1:
     Type: AWS::ECS::Service
     DependsOn: HTTPSListener1
@@ -959,8 +1049,8 @@ Resources:
       ServiceName: nginx-service-1
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref TaskDefinition1
-      EnableExecuteCommand: true
-      DesiredCount: 1
+      EnableExecuteCommand: !If [ECSExecEnabled, true, false]
+      DesiredCount: !If [EnableMutualTLS, 1, 0]
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
@@ -982,8 +1072,8 @@ Resources:
       ServiceName: nginx-service-2
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref TaskDefinition2
-      EnableExecuteCommand: true
-      DesiredCount: 1
+      EnableExecuteCommand: !If [ECSExecEnabled, true, false]
+      DesiredCount: !If [EnableMutualTLS, 1, 0]
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
@@ -1062,7 +1152,6 @@ Outputs:
           - !Ref AWS::Region
           - ".amazonaws.com/"
           - !Ref ECRRepositoryServiceOne
-          - ":latest"
   ECRRepositoryServiceTwoUri:
     Description: URI of created ECR repository Service Two
     Value:
@@ -1073,7 +1162,6 @@ Outputs:
           - !Ref AWS::Region
           - ".amazonaws.com/"
           - !Ref ECRRepositoryServiceTwo
-          - ":latest"
   ClusterName:
     Description: Name of created ECS cluster
     Value: !Ref ECSCluster
@@ -1086,3 +1174,7 @@ Outputs:
   S3bucket:
     Description: Name of created S3 bucket
     Value: !Ref StorageBucket
+  TrustStoreArn:
+    Condition: EnableMutualTLS
+    Description: ARN of the ALB trust store used for mutual TLS
+    Value: !GetAtt MutualTLSTrustStore.TrustStoreArn
